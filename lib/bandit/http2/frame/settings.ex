@@ -18,55 +18,9 @@ defmodule Bandit.HTTP2.Frame.Settings do
   @spec deserialize(Bandit.HTTP2.Frame.flags(), Bandit.HTTP2.Stream.stream_id(), iodata()) ::
           {:ok, t()} | {:error, Bandit.HTTP2.Errors.error_code(), binary()}
   def deserialize(flags, 0, payload) when clear?(flags, @ack_bit) do
-    payload
-    |> Stream.unfold(fn
-      <<>> -> nil
-      <<setting::16, value::32, rest::binary>> -> {{:ok, {setting, value}}, rest}
-      <<rest::binary>> -> {{:error, rest}, <<>>}
-    end)
-    |> Enum.reduce_while({:ok, %{}}, fn
-      {:ok, {0x01, value}}, {:ok, acc} ->
-        {:cont, {:ok, Map.put(acc, :header_table_size, value)}}
+    payload = IO.iodata_to_binary(payload)
 
-      {:ok, {0x02, val}}, {:ok, acc} when val in [0x00, 0x01] ->
-        {:cont, {:ok, acc}}
-
-      {:ok, {0x02, _value}}, {:ok, _acc} ->
-        {:halt,
-         {:error, Bandit.HTTP2.Errors.protocol_error(), "Invalid enable_push value (RFC9113§6.5)"}}
-
-      {:ok, {0x03, value}}, {:ok, acc} ->
-        {:cont, {:ok, Map.put(acc, :max_concurrent_streams, value)}}
-
-      {:ok, {0x04, value}}, {:ok, _acc} when value > @max_window_size ->
-        {:halt,
-         {:error, Bandit.HTTP2.Errors.flow_control_error(), "Invalid window_size (RFC9113§6.5)"}}
-
-      {:ok, {0x04, value}}, {:ok, acc} ->
-        {:cont, {:ok, Map.put(acc, :initial_window_size, value)}}
-
-      {:ok, {0x05, value}}, {:ok, _acc} when value < @min_frame_size ->
-        {:halt,
-         {:error, Bandit.HTTP2.Errors.frame_size_error(), "Invalid max_frame_size (RFC9113§6.5)"}}
-
-      {:ok, {0x05, value}}, {:ok, _acc} when value > @max_frame_size ->
-        {:halt,
-         {:error, Bandit.HTTP2.Errors.frame_size_error(), "Invalid max_frame_size (RFC9113§6.5)"}}
-
-      {:ok, {0x05, value}}, {:ok, acc} ->
-        {:cont, {:ok, Map.put(acc, :max_frame_size, value)}}
-
-      {:ok, {0x06, value}}, {:ok, acc} ->
-        {:cont, {:ok, Map.put(acc, :max_header_list_size, value)}}
-
-      {:ok, {_setting, _value}}, {:ok, acc} ->
-        {:cont, {:ok, acc}}
-
-      {:error, _rest}, _acc ->
-        {:halt,
-         {:error, Bandit.HTTP2.Errors.frame_size_error(), "Invalid SETTINGS size (RFC9113§6.5)"}}
-    end)
-    |> case do
+    case parse_settings(payload, %{}) do
       {:ok, settings} -> {:ok, %__MODULE__{ack: false, settings: settings}}
       {:error, error_code, reason} -> {:error, error_code, reason}
     end
@@ -83,6 +37,54 @@ defmodule Bandit.HTTP2.Frame.Settings do
 
   def deserialize(_flags, _stream_id, _payload) do
     {:error, Bandit.HTTP2.Errors.protocol_error(), "Invalid SETTINGS frame (RFC9113§6.5)"}
+  end
+
+  defp parse_settings(<<>>, acc), do: {:ok, acc}
+
+  defp parse_settings(<<0x01::16, value::32, rest::binary>>, acc) do
+    parse_settings(rest, Map.put(acc, :header_table_size, value))
+  end
+
+  defp parse_settings(<<0x02::16, val::32, rest::binary>>, acc) when val in [0x00, 0x01] do
+    parse_settings(rest, acc)
+  end
+
+  defp parse_settings(<<0x02::16, _val::32, _rest::binary>>, _acc) do
+    {:error, Bandit.HTTP2.Errors.protocol_error(), "Invalid enable_push value (RFC9113§6.5)"}
+  end
+
+  defp parse_settings(<<0x03::16, value::32, rest::binary>>, acc) do
+    parse_settings(rest, Map.put(acc, :max_concurrent_streams, value))
+  end
+
+  defp parse_settings(<<0x04::16, value::32, _rest::binary>>, _acc)
+       when value > @max_window_size do
+    {:error, Bandit.HTTP2.Errors.flow_control_error(), "Invalid window_size (RFC9113§6.5)"}
+  end
+
+  defp parse_settings(<<0x04::16, value::32, rest::binary>>, acc) do
+    parse_settings(rest, Map.put(acc, :initial_window_size, value))
+  end
+
+  defp parse_settings(<<0x05::16, value::32, _rest::binary>>, _acc)
+       when value < @min_frame_size or value > @max_frame_size do
+    {:error, Bandit.HTTP2.Errors.frame_size_error(), "Invalid max_frame_size (RFC9113§6.5)"}
+  end
+
+  defp parse_settings(<<0x05::16, value::32, rest::binary>>, acc) do
+    parse_settings(rest, Map.put(acc, :max_frame_size, value))
+  end
+
+  defp parse_settings(<<0x06::16, value::32, rest::binary>>, acc) do
+    parse_settings(rest, Map.put(acc, :max_header_list_size, value))
+  end
+
+  defp parse_settings(<<_setting::16, _value::32, rest::binary>>, acc) do
+    parse_settings(rest, acc)
+  end
+
+  defp parse_settings(_other, _acc) do
+    {:error, Bandit.HTTP2.Errors.frame_size_error(), "Invalid SETTINGS size (RFC9113§6.5)"}
   end
 
   defimpl Bandit.HTTP2.Frame.Serializable do
